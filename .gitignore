@@ -1,0 +1,84 @@
+# =========================
+# Python
+# =========================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# Environment / Secrets
+# =========================
+
+.env
+.env.*
+!.env.example
+
+# =========================
+# Testing / Coverage
+# =========================
+
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# =========================
+# Type checking / Linters
+# =========================
+
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# =========================
+# Packaging
+# =========================
+
+*.egg
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# =========================
+# IDEs
+# =========================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# Logs
+# =========================
+
+*.log
+logs/
+
+# =========================
+# Local database / data
+# =========================
+
+*.sqlite
+*.sqlite3
+*.db
+
+# =========================
+# OS
+# =========================
+
+.DS_Store
+Thumbs.db
+
+.python-version
