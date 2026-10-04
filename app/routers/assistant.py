@@ -46,6 +46,7 @@ async def query_assistant(
             peer_id=peer.id,
             question=data.question.strip(),
             client_messages=client_messages,
+            assistant_history=[item.model_dump() for item in data.assistant_history],
         )
     except AssistantBusy:
         raise HTTPException(status_code=429, detail="Assistant is busy, try again shortly")

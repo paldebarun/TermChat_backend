@@ -82,3 +82,9 @@ logs/
 Thumbs.db
 
 .python-version
+
+/tests
+
+reuirements-hermes.txt
+requirements-dev.txt
+plan.md

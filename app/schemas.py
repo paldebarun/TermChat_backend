@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -160,11 +161,18 @@ class ClientMessageContext(BaseModel):
     timestamp: datetime
 
 
+class AssistantHistoryItem(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=20_000)
+
+
 class AssistantQueryRequest(BaseModel):
     peer_username: str = Field(min_length=3, max_length=50)
     question: str = Field(min_length=1, max_length=20_000)
     # Only decrypted by the frontend. The backend keeps it in memory for this run.
     message_context: list[ClientMessageContext] = Field(default_factory=list, max_length=100)
+    # Earlier turns of the user's own assistant console, oldest first.
+    assistant_history: list[AssistantHistoryItem] = Field(default_factory=list, max_length=20)
 
 
 class AssistantQueryResponse(BaseModel):

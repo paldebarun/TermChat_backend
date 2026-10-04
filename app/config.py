@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     assistant_allow_message_context: bool = False
     assistant_max_context_messages: int = 100
     assistant_max_context_bytes: int = 1_000_000
+    assistant_max_history_bytes: int = 40_000
     assistant_recent_messages_limit: int = 20
     assistant_max_search_results: int = 8
     assistant_run_timeout_seconds: int = 120

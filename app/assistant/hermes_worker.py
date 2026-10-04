@@ -97,8 +97,14 @@ def _run(home: Path) -> dict:
         skip_context_files=True,
         save_trajectories=False,
     )
+    history = [
+        {"role": item["role"], "content": item["text"]}
+        for item in json.loads(os.getenv("ASSISTANT_HISTORY") or "[]")
+        if item.get("role") in ("user", "assistant")
+    ]
     result = agent.run_conversation(
         user_message=question,
+        conversation_history=history or None,
         task_id=os.getenv("ASSISTANT_RUN_ID"),
     )
     return {

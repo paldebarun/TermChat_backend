@@ -37,6 +37,23 @@ _APP_ROOT = Path(__file__).resolve().parents[2]
 _DOCKER_HERMES_PYTHON = Path("/opt/hermes-venv/bin/python")
 
 
+def _trim_history(history: list[dict], max_bytes: int) -> list[dict]:
+    """Keep the newest turns that fit in max_bytes (env vars have a size limit)."""
+    kept: list[dict] = []
+    used = 0
+    for item in reversed(history):
+        size = len(item["text"].encode("utf-8"))
+        if used + size > max_bytes:
+            break
+        kept.append(item)
+        used += size
+    kept.reverse()
+    # A reply with no preceding question would confuse the model.
+    while kept and kept[0]["role"] != "user":
+        kept.pop(0)
+    return kept
+
+
 class AssistantBusy(Exception):
     """No run slot became free within assistant_queue_timeout_seconds."""
 
@@ -65,6 +82,7 @@ async def run_assistant(
     peer_id: uuid.UUID,
     question: str,
     client_messages: list[ClientMessage],
+    assistant_history: list[dict] | None = None,
 ) -> tuple[uuid.UUID, str, dict]:
     settings = get_settings()
     run_id = uuid.uuid4()
@@ -124,6 +142,9 @@ async def run_assistant(
                 "ASSISTANT_MAX_ITERATIONS": str(settings.assistant_max_iterations),
                 "ASSISTANT_MAX_OUTPUT_TOKENS": str(settings.assistant_max_output_tokens),
                 "ASSISTANT_QUESTION": question,
+                "ASSISTANT_HISTORY": json.dumps(
+                    _trim_history(assistant_history or [], settings.assistant_max_history_bytes)
+                ),
                 # Trailing slash matters: "/mcp" 307-redirects to "/mcp/".
                 "ASSISTANT_MCP_URL": settings.assistant_mcp_internal_url.rstrip("/") + "/",
                 "ASSISTANT_SCOPE_TOKEN": scope_token,
