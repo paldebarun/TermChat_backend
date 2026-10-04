@@ -50,3 +50,7 @@ class ConnectionManager:
 
     def is_connected(self, user_id: str) -> bool:
         return bool(self.active_connections.get(user_id))
+
+
+# Shared instance: the /ws endpoint and REST routers (group events) both use it.
+manager = ConnectionManager()

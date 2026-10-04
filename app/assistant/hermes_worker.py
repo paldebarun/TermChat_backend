@@ -8,7 +8,8 @@ the standard library, PyYAML and Hermes itself - never the rest of the app
 Everything arrives via environment variables (not argv, which `ps` shows):
 ASSISTANT_QUESTION, ASSISTANT_MCP_URL, ASSISTANT_SCOPE_TOKEN, ASSISTANT_RUN_ID,
 ASSISTANT_HERMES_MODEL, OPENROUTER_API_KEY, optional ASSISTANT_HERMES_HOME /
-ASSISTANT_MAX_ITERATIONS / ASSISTANT_MAX_OUTPUT_TOKENS / OPENROUTER_BASE_URL.
+ASSISTANT_MAX_ITERATIONS / ASSISTANT_MAX_OUTPUT_TOKENS / OPENROUTER_BASE_URL, and for group chats
+ASSISTANT_CONVERSATION_KIND=group / ASSISTANT_GROUP_NAME / ASSISTANT_PARTICIPANTS (JSON list).
 
 stdout carries exactly one JSON document; everything else goes to stderr.
 
@@ -33,7 +34,7 @@ from pathlib import Path
 
 import yaml
 
-from app.assistant.prompts import SYSTEM_PROMPT
+from app.assistant.prompts import build_system_prompt
 
 MCP_SERVER_NAME = "chat_scope"
 ALLOWED_TOOLS = [
@@ -92,7 +93,11 @@ def _run(home: Path) -> dict:
         disabled_toolsets=["terminal", "browser", "computer", "vision"],
         max_iterations=int(os.getenv("ASSISTANT_MAX_ITERATIONS", "12")),
         max_tokens=int(os.getenv("ASSISTANT_MAX_OUTPUT_TOKENS", "1200")),
-        ephemeral_system_prompt=SYSTEM_PROMPT,
+        ephemeral_system_prompt=build_system_prompt(
+            os.getenv("ASSISTANT_CONVERSATION_KIND", "dm"),
+            os.getenv("ASSISTANT_GROUP_NAME"),
+            json.loads(os.getenv("ASSISTANT_PARTICIPANTS") or "[]"),
+        ),
         skip_memory=True,
         skip_context_files=True,
         save_trajectories=False,

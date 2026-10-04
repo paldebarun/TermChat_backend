@@ -6,7 +6,6 @@ import uuid
 
 from app import crud, storage
 from app.assistant.document_extract import UnsupportedDocument, chunk_text, extract_text
-from app.assistant.scope import conversation_id_for_users
 from app.assistant.vectorstore import vector_store
 from app.config import get_settings
 
@@ -15,9 +14,8 @@ logger = logging.getLogger(__name__)
 
 async def index_attachment(
     *,
+    conversation_id: uuid.UUID,
     file_id: uuid.UUID,
-    sender_id: uuid.UUID,
-    recipient_id: uuid.UUID,
     filename: str,
     content_type: str,
 ) -> None:
@@ -36,7 +34,7 @@ async def index_attachment(
         chunks = chunk_text(text)
         await asyncio.to_thread(
             vector_store.upsert_document,
-            conversation_id=str(conversation_id_for_users(sender_id, recipient_id)),
+            conversation_id=str(conversation_id),
             file_id=str(file_id),
             filename=filename,
             chunks=chunks,

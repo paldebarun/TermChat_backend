@@ -5,9 +5,22 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.models import AssistantRun, AssistantToolCall, Message, UploadedFile, UploadStatus, User
-from app.schemas import EncryptedMessageIn, UserSignup
+from app.groups import pick_successor_admin
+from app.models import (
+    AssistantRun,
+    AssistantToolCall,
+    Group,
+    GroupMember,
+    GroupMessage,
+    GroupMessageRecipient,
+    Message,
+    UploadedFile,
+    UploadStatus,
+    User,
+)
+from app.schemas import EncryptedMessageIn, GroupMessageIn, UserSignup
 
 
 async def get_user_by_id(db: AsyncSession, user_id: uuid.UUID) -> User | None:
@@ -145,6 +158,19 @@ async def user_can_access_file(db: AsyncSession, file: UploadedFile, user_id: uu
             )
         )
     )
+    if result.scalar():
+        return True
+
+    # Group messages: anyone the message was delivered to (or queued for).
+    result = await db.execute(
+        select(
+            exists().where(
+                GroupMessage.attachment_file_id == file.id,
+                GroupMessage.id == GroupMessageRecipient.message_id,
+                GroupMessageRecipient.recipient_id == user_id,
+            )
+        )
+    )
     return bool(result.scalar())
 
 
@@ -154,15 +180,150 @@ async def get_orphaned_completed_files(db: AsyncSession, older_than_minutes: int
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
 
     attached_file_ids = select(Message.attachment_file_id).where(Message.attachment_file_id.is_not(None))
+    group_attached_file_ids = select(GroupMessage.attachment_file_id).where(
+        GroupMessage.attachment_file_id.is_not(None)
+    )
 
     result = await db.execute(
         select(UploadedFile).where(
             UploadedFile.status == UploadStatus.COMPLETED,
             UploadedFile.created_at < cutoff,
             UploadedFile.id.not_in(attached_file_ids),
+            UploadedFile.id.not_in(group_attached_file_ids),
         )
     )
     return list(result.scalars().all())
+
+
+# --- Groups -----------------------------------------------------------------
+
+def _group_query():
+    return select(Group).options(selectinload(Group.members).selectinload(GroupMember.user))
+
+
+async def get_group(db: AsyncSession, group_id: uuid.UUID) -> Group | None:
+    """Group with members (and their users) eagerly loaded. Always re-reads
+    so callers see membership changes made earlier in the same session."""
+    result = await db.execute(
+        _group_query().where(Group.id == group_id).execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_member_role(db: AsyncSession, group_id: uuid.UUID, user_id: uuid.UUID) -> str | None:
+    result = await db.execute(
+        select(GroupMember.role).where(GroupMember.group_id == group_id, GroupMember.user_id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_group(db: AsyncSession, name: str, creator: User, members: list[User]) -> Group:
+    group = Group(name=name, created_by=creator.id)
+    group.members.append(GroupMember(user_id=creator.id, role="admin"))
+    for user in members:
+        group.members.append(GroupMember(user_id=user.id, role="member"))
+    db.add(group)
+    await db.commit()
+    return await get_group(db, group.id)
+
+
+async def list_groups_for_user(db: AsyncSession, user_id: uuid.UUID) -> list[Group]:
+    result = await db.execute(
+        _group_query()
+        .where(Group.id.in_(select(GroupMember.group_id).where(GroupMember.user_id == user_id)))
+        .order_by(Group.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def rename_group(db: AsyncSession, group: Group, name: str) -> Group:
+    group.name = name
+    await db.commit()
+    return await get_group(db, group.id)
+
+
+async def add_group_members(db: AsyncSession, group: Group, users: list[User]) -> Group:
+    for user in users:
+        db.add(GroupMember(group_id=group.id, user_id=user.id, role="member"))
+    await db.commit()
+    return await get_group(db, group.id)
+
+
+async def remove_group_member(db: AsyncSession, group: Group, user_id: uuid.UUID) -> Group | None:
+    """Removes a member. If no admin remains, the oldest remaining member is
+    promoted. Deletes the group (returns None) when it becomes empty."""
+    leaving = next((m for m in group.members if m.user_id == user_id), None)
+    if leaving is None:
+        return group
+    remaining = [m for m in group.members if m.user_id != user_id]
+    group_id = group.id
+
+    if not remaining:
+        await db.delete(group)
+        await db.commit()
+        return None
+
+    successor = pick_successor_admin((m.user.username, m.role, m.joined_at) for m in remaining)
+    if successor is not None:
+        next(m for m in remaining if m.user.username == successor).role = "admin"
+    await db.delete(leaving)
+    await db.commit()
+    return await get_group(db, group_id)
+
+
+async def group_message_exists(db: AsyncSession, message_id: uuid.UUID) -> bool:
+    result = await db.execute(select(exists().where(GroupMessage.id == message_id)))
+    return bool(result.scalar())
+
+
+async def save_group_message(
+    db: AsyncSession,
+    *,
+    sender_id: uuid.UUID,
+    payload: GroupMessageIn,
+    keys_by_user_id: dict[uuid.UUID, str],
+    online_user_ids: set[uuid.UUID],
+) -> GroupMessage:
+    message = GroupMessage(
+        id=payload.message_id,
+        group_id=payload.group_id,
+        sender_id=sender_id,
+        encrypted_content=payload.encrypted_content,
+        nonce=payload.nonce,
+        tag=payload.tag,
+        attachment_file_id=payload.attachment.file_id if payload.attachment else None,
+        attachment_filename=payload.attachment.filename if payload.attachment else None,
+    )
+    for user_id, encrypted_key in keys_by_user_id.items():
+        message.recipients.append(
+            GroupMessageRecipient(
+                recipient_id=user_id,
+                encrypted_key=encrypted_key,
+                # The sender already has their own plaintext; never queue for them.
+                delivered=(user_id == sender_id) or (user_id in online_user_ids),
+            )
+        )
+    db.add(message)
+    await db.commit()
+    await db.refresh(message)
+    return message
+
+
+async def get_undelivered_group_messages(
+    db: AsyncSession, recipient_id: uuid.UUID
+) -> list[tuple[GroupMessage, GroupMessageRecipient]]:
+    result = await db.execute(
+        select(GroupMessage, GroupMessageRecipient)
+        .join(GroupMessageRecipient, GroupMessageRecipient.message_id == GroupMessage.id)
+        .where(GroupMessageRecipient.recipient_id == recipient_id, GroupMessageRecipient.delivered.is_(False))
+        .order_by(GroupMessage.created_at.asc())
+    )
+    return [(m, r) for m, r in result.all()]
+
+
+async def mark_group_delivered(db: AsyncSession, recipient: GroupMessageRecipient) -> None:
+    recipient.delivered = True
+    await db.commit()
 
 # --- AI assistant runs / tool calls -----------------------------------------
 
@@ -300,3 +461,31 @@ async def file_belongs_to_conversation(
         )
     )
     return bool(result.scalar())
+
+async def group_file_ids_for_user(db: AsyncSession, group_id: uuid.UUID, user_id: uuid.UUID) -> list[str]:
+    """Completed files attached to messages of this group that were sent by
+    the user or addressed to them (so a later joiner never gets files that
+    were shared before they joined)."""
+    result = await db.execute(
+        select(GroupMessage.attachment_file_id)
+        .join(UploadedFile, UploadedFile.id == GroupMessage.attachment_file_id)
+        .outerjoin(
+            GroupMessageRecipient,
+            (GroupMessageRecipient.message_id == GroupMessage.id)
+            & (GroupMessageRecipient.recipient_id == user_id),
+        )
+        .where(
+            GroupMessage.group_id == group_id,
+            UploadedFile.status == UploadStatus.COMPLETED,
+            (GroupMessage.sender_id == user_id) | (GroupMessageRecipient.recipient_id == user_id),
+        )
+        .distinct()
+    )
+    return [str(file_id) for file_id in result.scalars().all()]
+
+
+async def group_file_accessible(
+    db: AsyncSession, file_id: uuid.UUID, group_id: uuid.UUID, user_id: uuid.UUID
+) -> bool:
+    """Authorization for the assistant's get_document_content in a group."""
+    return str(file_id) in await group_file_ids_for_user(db, group_id, user_id)

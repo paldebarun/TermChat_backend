@@ -7,6 +7,15 @@ import chromadb
 from app.config import get_settings
 
 
+def search_filter(conversation_id: str, file_ids: list[str] | None) -> dict:
+    """Chroma `where` for a search: the conversation, optionally narrowed to
+    the files the caller may see (used for groups, where later joiners must
+    not reach documents sent before they joined)."""
+    if file_ids is None:
+        return {"conversation_id": conversation_id}
+    return {"$and": [{"conversation_id": conversation_id}, {"file_id": {"$in": file_ids}}]}
+
+
 class ConversationVectorStore:
     def __init__(self) -> None:
         self._client = None
@@ -58,11 +67,15 @@ class ConversationVectorStore:
     def delete_file(self, file_id: str) -> None:
         self._collection_for_use().delete(where={"file_id": file_id})
 
-    def search(self, *, conversation_id: str, query: str, limit: int) -> list[dict]:
+    def search(
+        self, *, conversation_id: str, query: str, limit: int, file_ids: list[str] | None = None
+    ) -> list[dict]:
+        if file_ids is not None and not file_ids:
+            return []
         result = self._collection_for_use().query(
             query_texts=[query],
             n_results=limit,
-            where={"conversation_id": conversation_id},
+            where=search_filter(conversation_id, file_ids),
             include=["documents", "metadatas", "distances"],
         )
         docs = result.get("documents", [[]])[0]

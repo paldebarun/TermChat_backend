@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud
 from app.assistant.cache import ClientMessage, message_context_cache
-from app.assistant.scope import conversation_id_for_users, create_scope_token
+from app.assistant.scope import conversation_id_for_group, conversation_id_for_users, create_scope_token
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -79,14 +79,21 @@ async def run_assistant(
     db: AsyncSession,
     *,
     user_id: uuid.UUID,
-    peer_id: uuid.UUID,
+    peer_id: uuid.UUID | None = None,
+    group_id: uuid.UUID | None = None,
+    group_name: str | None = None,
+    participants: list[str] | None = None,
     question: str,
     client_messages: list[ClientMessage],
     assistant_history: list[dict] | None = None,
 ) -> tuple[uuid.UUID, str, dict]:
+    """One assistant turn, scoped to a 1:1 chat (`peer_id`) or a group (`group_id`)."""
     settings = get_settings()
     run_id = uuid.uuid4()
-    conversation_id = conversation_id_for_users(user_id, peer_id)
+    if group_id is not None:
+        conversation_id = conversation_id_for_group(group_id)
+    else:
+        conversation_id = conversation_id_for_users(user_id, peer_id)
 
     # The run row must exist (status RUNNING) before the worker connects back:
     # mcp_http.py only honours a scope token while its run is RUNNING.
@@ -122,7 +129,7 @@ async def run_assistant(
         # time spent queueing never eats into their TTLs.
         if settings.assistant_allow_message_context and client_messages:
             await message_context_cache.put(run_id, client_messages)
-        scope_token = create_scope_token(run_id=run_id, user_id=user_id, peer_id=peer_id)
+        scope_token = create_scope_token(run_id=run_id, user_id=user_id, peer_id=peer_id, group_id=group_id)
 
         # Allowlisted env only: the agent reads untrusted documents, so it
         # must never inherit JWT/DB/SeaweedFS/scope secrets from this process.
@@ -142,6 +149,9 @@ async def run_assistant(
                 "ASSISTANT_MAX_ITERATIONS": str(settings.assistant_max_iterations),
                 "ASSISTANT_MAX_OUTPUT_TOKENS": str(settings.assistant_max_output_tokens),
                 "ASSISTANT_QUESTION": question,
+                "ASSISTANT_CONVERSATION_KIND": "group" if group_id is not None else "dm",
+                "ASSISTANT_GROUP_NAME": group_name or "",
+                "ASSISTANT_PARTICIPANTS": json.dumps(participants or []),
                 "ASSISTANT_HISTORY": json.dumps(
                     _trim_history(assistant_history or [], settings.assistant_max_history_bytes)
                 ),

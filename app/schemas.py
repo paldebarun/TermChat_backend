@@ -87,6 +87,98 @@ class WsError(BaseModel):
     detail: str
 
 
+# --- Groups -----------------------------------------------------------------
+
+class GroupKeyEntry(BaseModel):
+    recipient: str  # member username
+    encrypted_key: str  # the message's AES key, RSA-OAEP wrapped for that member
+
+
+class GroupMessageIn(BaseModel):
+    type: Literal["group_message"] = "group_message"
+    message_id: uuid.UUID
+    group_id: uuid.UUID
+    encrypted_content: str
+    nonce: str = Field(max_length=64)
+    tag: str = Field(max_length=64)
+    timestamp: datetime
+    attachment: AttachmentRef | None = None
+    keys: list[GroupKeyEntry] = Field(min_length=1)
+
+
+class GroupMessageOut(BaseModel):
+    type: Literal["group_message"] = "group_message"
+    message_id: uuid.UUID
+    group_id: uuid.UUID
+    sender: str
+    encrypted_content: str
+    encrypted_key: str  # wrapped for the receiving member only
+    nonce: str
+    tag: str
+    timestamp: datetime
+    attachment: AttachmentRef | None = None
+
+
+class GroupEvent(BaseModel):
+    type: Literal["group_event"] = "group_event"
+    group_id: uuid.UUID
+    event: Literal["created", "renamed", "member_added", "member_removed", "member_left"]
+    actor: str
+    username: str | None = None  # the member affected, where applicable
+
+
+class GroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    members: list[str] = Field(default_factory=list)  # usernames, creator is added automatically
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Group name cannot be empty")
+        return v
+
+
+class GroupUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Group name cannot be empty")
+        return v
+
+
+class GroupMembersAdd(BaseModel):
+    usernames: list[str] = Field(min_length=1)
+
+
+class GroupMemberOut(BaseModel):
+    username: str
+    role: Literal["admin", "member"]
+    public_key: str | None
+    joined_at: datetime
+
+
+class GroupOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    created_by: str  # username
+    created_at: datetime
+    members: list[GroupMemberOut]
+
+
+class GroupSummary(BaseModel):
+    id: uuid.UUID
+    name: str
+    created_at: datetime
+    member_count: int
+    my_role: Literal["admin", "member"]
+
+
 # --- Multipart upload control plane -----------------------------------------
 
 class UploadInitRequest(BaseModel):
@@ -172,6 +264,15 @@ class AssistantQueryRequest(BaseModel):
     # Only decrypted by the frontend. The backend keeps it in memory for this run.
     message_context: list[ClientMessageContext] = Field(default_factory=list, max_length=100)
     # Earlier turns of the user's own assistant console, oldest first.
+    assistant_history: list[AssistantHistoryItem] = Field(default_factory=list, max_length=20)
+
+
+class AssistantGroupQueryRequest(BaseModel):
+    group_id: uuid.UUID
+    question: str = Field(min_length=1, max_length=20_000)
+    # Decrypted by the frontend; for a group this is the whole group's messages
+    # (all senders), so the user's consent must cover other members' text.
+    message_context: list[ClientMessageContext] = Field(default_factory=list, max_length=100)
     assistant_history: list[AssistantHistoryItem] = Field(default_factory=list, max_length=20)
 
 

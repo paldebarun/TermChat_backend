@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     orphan_cleanup_interval_minutes: int = 30
     orphan_cleanup_threshold_minutes: int = 60
 
+    group_max_members: int = 256
+
     assistant_hermes_model: str = "nousresearch/hermes-4-405b"
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"

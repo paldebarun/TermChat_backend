@@ -68,14 +68,21 @@ async def search_chat_messages(query: str, limit: int = 8) -> dict:
 
 @mcp.tool
 async def search_chat_documents(query: str, limit: int = 6) -> dict:
-    """Search only documents shared in the current 1:1 conversation."""
+    """Search only documents shared in the current conversation (1:1 chat or group)."""
     scope = require_scope()
     conversation_id = scope["conversation_id"]
+    file_ids = None
+    if scope["kind"] == "group":
+        async with AsyncSessionLocal() as db:
+            file_ids = await crud.group_file_ids_for_user(
+                db, uuid.UUID(scope["group_id"]), uuid.UUID(scope["user_id"])
+            )
     results = await asyncio.to_thread(
         vector_store.search,
         conversation_id=conversation_id,
         query=query,
         limit=_clamp(limit, get_settings().assistant_max_search_results),
+        file_ids=file_ids,
     )
     return {"results": results}
 
@@ -89,10 +96,15 @@ async def get_document_content(file_id: str) -> dict:
     except ValueError:
         raise ValueError("file_id must be a valid document id returned by search_chat_documents")
     current_user = uuid.UUID(scope["user_id"])
-    peer = uuid.UUID(scope["peer_id"])
 
     async with AsyncSessionLocal() as db:
-        if not await crud.file_belongs_to_conversation(db, db_file_id, current_user, peer):
+        if scope["kind"] == "group":
+            allowed = await crud.group_file_accessible(db, db_file_id, uuid.UUID(scope["group_id"]), current_user)
+        else:
+            allowed = await crud.file_belongs_to_conversation(
+                db, db_file_id, current_user, uuid.UUID(scope["peer_id"])
+            )
+        if not allowed:
             raise ValueError("document is not part of the current conversation")
         file = await crud.get_uploaded_file(db, db_file_id)
 

@@ -24,6 +24,12 @@ def conversation_id_for_users(user_a: uuid.UUID, user_b: uuid.UUID) -> uuid.UUID
     return uuid.uuid5(uuid.NAMESPACE_URL, f"e2e-chat:conversation:{first}:{second}")
 
 
+def conversation_id_for_group(group_id: uuid.UUID) -> uuid.UUID:
+    """Stable conversation id for a group chat. A different uuid5 namespace
+    string from the 1:1 ids, so a group id can never equal a DM id."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"e2e-chat:group:{group_id}")
+
+
 MIN_SECRET_LENGTH = 32
 
 
@@ -38,16 +44,33 @@ def require_strong_secret() -> str:
     return secret
 
 
-def create_scope_token(*, run_id: uuid.UUID, user_id: uuid.UUID, peer_id: uuid.UUID) -> str:
+def create_scope_token(
+    *,
+    run_id: uuid.UUID,
+    user_id: uuid.UUID,
+    peer_id: uuid.UUID | None = None,
+    group_id: uuid.UUID | None = None,
+) -> str:
+    """Scope for one run: either a 1:1 chat (`peer_id`) or a group (`group_id`)."""
+    if (peer_id is None) == (group_id is None):
+        raise ValueError("exactly one of peer_id or group_id is required")
     settings = get_settings()
     require_strong_secret()
+    if group_id is not None:
+        kind, conversation_id = "group", conversation_id_for_group(group_id)
+    else:
+        kind, conversation_id = "dm", conversation_id_for_users(user_id, peer_id)
     payload = {
         "run_id": str(run_id),
         "user_id": str(user_id),
-        "peer_id": str(peer_id),
-        "conversation_id": str(conversation_id_for_users(user_id, peer_id)),
+        "kind": kind,
+        "conversation_id": str(conversation_id),
         "exp": int(time.time()) + settings.assistant_scope_token_ttl_seconds,
     }
+    if kind == "group":
+        payload["group_id"] = str(group_id)
+    else:
+        payload["peer_id"] = str(peer_id)
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     encoded = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
     sig = hmac.new(
@@ -82,8 +105,13 @@ def validate_scope_token(token: str) -> dict:
             raise ValueError("expired")
         uuid.UUID(payload["run_id"])
         uuid.UUID(payload["user_id"])
-        uuid.UUID(payload["peer_id"])
         uuid.UUID(payload["conversation_id"])
+        if payload["kind"] == "group":
+            uuid.UUID(payload["group_id"])
+        elif payload["kind"] == "dm":
+            uuid.UUID(payload["peer_id"])
+        else:
+            raise ValueError("unknown scope kind")
         return payload
     except (ValueError, KeyError, TypeError, json.JSONDecodeError):
         raise HTTPException(

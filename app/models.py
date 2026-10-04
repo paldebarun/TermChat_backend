@@ -83,6 +83,83 @@ class Message(Base):
     attachment: Mapped["UploadedFile | None"] = relationship("UploadedFile")
 
 
+class Group(Base):
+    __tablename__ = "groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    members: Mapped[list["GroupMember"]] = relationship(
+        "GroupMember", back_populates="group", cascade="all, delete-orphan", order_by="GroupMember.joined_at"
+    )
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    role: Mapped[str] = mapped_column(String(16), default="member", nullable=False)  # "admin" | "member"
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    group: Mapped["Group"] = relationship("Group", back_populates="members")
+    user: Mapped["User"] = relationship("User")
+
+
+class GroupMessage(Base):
+    """One AES-GCM ciphertext shared by the whole group. The per-message AES
+    key is wrapped separately for each member in GroupMessageRecipient."""
+
+    __tablename__ = "group_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)  # client message_id
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sender_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    encrypted_content: Mapped[str] = mapped_column(Text, nullable=False)
+    nonce: Mapped[str] = mapped_column(String(64), nullable=False)
+    tag: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    attachment_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("uploaded_files.id", ondelete="SET NULL"), nullable=True
+    )
+    attachment_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    recipients: Mapped[list["GroupMessageRecipient"]] = relationship(
+        "GroupMessageRecipient", back_populates="message", cascade="all, delete-orphan"
+    )
+
+
+class GroupMessageRecipient(Base):
+    """Per-member wrapped key; also the member's offline queue entry and the
+    access-control record for the message's attachment."""
+
+    __tablename__ = "group_message_recipients"
+
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("group_messages.id", ondelete="CASCADE"), primary_key=True
+    )
+    recipient_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    encrypted_key: Mapped[str] = mapped_column(Text, nullable=False)
+    delivered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    message: Mapped["GroupMessage"] = relationship("GroupMessage", back_populates="recipients")
+
+
 class UploadedFile(Base):
     """One row per attachment upload session. id doubles as both the
     transient "upload_id" a client polls/resumes against while the
