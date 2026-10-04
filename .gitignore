@@ -85,6 +85,9 @@ Thumbs.db
 
 /tests
 
-reuirements-hermes.txt
+requirements-hermes.txt
 requirements-dev.txt
 plan.md
+backend-contract.md
+frontend.md
+
