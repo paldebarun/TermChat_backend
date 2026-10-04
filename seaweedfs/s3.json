@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "chat-app",
+      "credentials": [
+        {
+          "accessKey": "seaweedadmin",
+          "secretKey": "seaweedadmin123"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

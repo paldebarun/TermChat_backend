@@ -151,3 +151,23 @@ class DownloadUrlResponse(BaseModel):
     url: str
     filename: str
     expires_in: int
+
+
+class ClientMessageContext(BaseModel):
+    message_id: uuid.UUID
+    sender: str = Field(min_length=1, max_length=50)
+    text: str = Field(min_length=1, max_length=50_000)
+    timestamp: datetime
+
+
+class AssistantQueryRequest(BaseModel):
+    peer_username: str = Field(min_length=3, max_length=50)
+    question: str = Field(min_length=1, max_length=20_000)
+    # Only decrypted by the frontend. The backend keeps it in memory for this run.
+    message_context: list[ClientMessageContext] = Field(default_factory=list, max_length=100)
+
+
+class AssistantQueryResponse(BaseModel):
+    run_id: uuid.UUID
+    conversation_id: uuid.UUID
+    response: str

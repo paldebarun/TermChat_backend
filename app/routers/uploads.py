@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import math
 import re
 import uuid
@@ -7,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import auth, crud, storage
+from app.assistant.vectorstore import vector_store
 from app.config import get_settings
 from app.database import get_db
 from app.models import UploadedFile, UploadStatus, User
@@ -24,6 +27,7 @@ from app.schemas import (
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -55,7 +59,7 @@ async def init_upload(
     file_id = uuid.uuid4()
     s3_key = f"attachments/{current_user.id}/{file_id}/{_safe_filename(data.filename)}"
 
-    s3_upload_id = storage.create_multipart_upload(s3_key, data.content_type)
+    s3_upload_id = await asyncio.to_thread(storage.create_multipart_upload, s3_key, data.content_type)
 
     file = await crud.create_uploaded_file(
         db,
@@ -71,7 +75,7 @@ async def init_upload(
     )
 
     first_batch = list(range(1, min(total_parts, settings.upload_init_batch_size) + 1))
-    part_urls = storage.generate_part_urls(s3_key, s3_upload_id, first_batch)
+    part_urls = await asyncio.to_thread(storage.generate_part_urls, s3_key, s3_upload_id, first_batch)
 
     return UploadInitResponse(
         upload_id=file.id,
@@ -97,7 +101,9 @@ async def get_part_urls(
     if invalid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid part numbers: {invalid}")
 
-    part_urls = storage.generate_part_urls(file.s3_key, file.s3_upload_id, data.part_numbers)
+    part_urls = await asyncio.to_thread(
+        storage.generate_part_urls, file.s3_key, file.s3_upload_id, data.part_numbers
+    )
     return PartUrlsResponse(part_urls=part_urls)
 
 
@@ -113,7 +119,7 @@ async def get_upload_status(
     file = await _get_owned_file(db, upload_id, current_user)
 
     uploaded = (
-        storage.list_parts(file.s3_key, file.s3_upload_id)
+        await asyncio.to_thread(storage.list_parts, file.s3_key, file.s3_upload_id)
         if file.status == UploadStatus.UPLOADING
         else []
     )
@@ -149,7 +155,8 @@ async def complete_upload(
 
     file = await crud.set_upload_status(db, file, UploadStatus.COMPLETING)
     try:
-        storage.complete_multipart_upload(
+        await asyncio.to_thread(
+            storage.complete_multipart_upload,
             file.s3_key,
             file.s3_upload_id,
             [{"part_number": p.part_number, "etag": p.etag} for p in data.parts],
@@ -157,7 +164,7 @@ async def complete_upload(
     except Exception as exc:
         # Leave it in COMPLETING rather than silently marking COMPLETED -
         # the client can retry /complete once the underlying issue (e.g. a
-        # transient MinIO error) is resolved.
+        # transient SeaweedFS error) is resolved.
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Failed to finalize upload: {exc}"
         )
@@ -174,7 +181,7 @@ async def abort_upload(
     db: AsyncSession = Depends(get_db),
 ):
     """Called when the user detaches a file while it's still uploading.
-    Aborting the multipart upload lets MinIO reclaim the parts already
+    Aborting the multipart upload lets SeaweedFS reclaim the parts already
     received - no need to delete them one by one."""
     file = await _get_owned_file(db, upload_id, current_user)
     if file.status not in (UploadStatus.UPLOADING, UploadStatus.ABORTING):
@@ -182,7 +189,7 @@ async def abort_upload(
 
     file = await crud.set_upload_status(db, file, UploadStatus.ABORTING)
     try:
-        storage.abort_multipart_upload(file.s3_key, file.s3_upload_id)
+        await asyncio.to_thread(storage.abort_multipart_upload, file.s3_key, file.s3_upload_id)
     except Exception:
         # Already gone (e.g. double-abort) is fine; anything else, surface it.
         pass
@@ -206,7 +213,12 @@ async def delete_upload(
             detail="Only a completed upload can be deleted this way; use /abort while it's still uploading",
         )
 
-    storage.delete_object(file.s3_key)
+    await asyncio.to_thread(storage.delete_object, file.s3_key)
+    # Embeddings of a deleted file must not stay searchable by the assistant.
+    try:
+        await asyncio.to_thread(vector_store.delete_file, str(file.id))
+    except Exception:
+        logger.exception("Failed to delete embeddings for %s", file.id)
     return await crud.set_upload_status(db, file, UploadStatus.DELETED)
 
 
@@ -222,5 +234,5 @@ async def get_download_url(
     if not await crud.user_can_access_file(db, file, current_user.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
-    url = storage.generate_download_url(file.s3_key, file.filename)
+    url = await asyncio.to_thread(storage.generate_download_url, file.s3_key, file.filename)
     return DownloadUrlResponse(url=url, filename=file.filename, expires_in=settings.presigned_url_expiry_seconds)

@@ -1,14 +1,23 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
+fastapi>=0.130,<1
+uvicorn[standard]>=0.35
 sqlalchemy[asyncio]==2.0.35
 asyncpg==0.29.0
-pydantic==2.9.2
-pydantic-settings==2.5.2
+# fastmcp 4.x requires pydantic>=2.12, starlette>=1.0.1, python-multipart>=0.0.26,
+# uvicorn>=0.35 and websockets>=15.0.1, so these can't be pinned to older releases.
+pydantic>=2.12,<3
+pydantic-settings>=2.10,<3
 email-validator==2.2.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-bcrypt==4.3.0
-python-multipart==0.0.9
+# passlib 1.7.4 reads bcrypt.__about__, which bcrypt removed in 4.1; newer bcrypt makes
+# passlib log a noisy '(trapped) error reading bcrypt version' traceback on every start.
+bcrypt==4.0.1
+python-multipart>=0.0.26
 cryptography==43.0.1
-websockets==13.1
+websockets>=15.0.1
 boto3==1.35.36
+
+fastmcp==4.0.10
+chromadb==0.5.23
+pypdf==5.0.1
+python-docx==1.1.2

@@ -11,15 +11,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements.txt requirements-hermes.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Hermes gets its own venv so its exact dependency pins can't conflict with
+# the app's (see requirements-hermes.txt).
+RUN python -m venv /opt/hermes-venv \
+    && /opt/hermes-venv/bin/pip install --no-cache-dir -r requirements-hermes.txt
 
 COPY app ./app
 
 RUN useradd --create-home appuser
 USER appuser
+
+# Chroma's default embedding model (ONNX MiniLM) is otherwise downloaded on
+# the first search/index call, which blocks that request and needs outbound
+# network at runtime. Fetch it at build time into appuser's cache.
+RUN python -c "from chromadb.utils.embedding_functions import DefaultEmbeddingFunction as D; D()(['warm'])"
 
 EXPOSE 8000
 
