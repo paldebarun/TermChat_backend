@@ -8,7 +8,9 @@ the standard library, PyYAML and Hermes itself - never the rest of the app
 Everything arrives via environment variables (not argv, which `ps` shows):
 ASSISTANT_QUESTION, ASSISTANT_MCP_URL, ASSISTANT_SCOPE_TOKEN, ASSISTANT_RUN_ID,
 ASSISTANT_HERMES_MODEL, OPENROUTER_API_KEY, optional ASSISTANT_HERMES_HOME /
-ASSISTANT_MAX_ITERATIONS / ASSISTANT_MAX_OUTPUT_TOKENS / OPENROUTER_BASE_URL, and for group chats
+ASSISTANT_MAX_ITERATIONS / ASSISTANT_MAX_OUTPUT_TOKENS / OPENROUTER_BASE_URL /
+ASSISTANT_SYNTHESIZER_ENABLED / ASSISTANT_SYNTHESIZER_MODEL / ASSISTANT_SYNTHESIZER_MAX_INPUT_CHARS /
+ASSISTANT_FILES (JSON list of the conversation's files), and for group chats
 ASSISTANT_CONVERSATION_KIND=group / ASSISTANT_GROUP_NAME / ASSISTANT_PARTICIPANTS (JSON list).
 
 stdout carries exactly one JSON document; everything else goes to stderr.
@@ -35,11 +37,13 @@ from pathlib import Path
 import yaml
 
 from app.assistant.prompts import build_system_prompt
+from app.assistant.synthesizer import build_synthesis_messages, collect_tool_results, synthesize
 
 MCP_SERVER_NAME = "chat_scope"
 ALLOWED_TOOLS = [
     "get_recent_chat_context",
     "search_chat_messages",
+    "list_chat_documents",
     "search_chat_documents",
     "get_document_content",
 ]
@@ -83,20 +87,27 @@ def _run(home: Path) -> dict:
 
     from run_agent import AIAgent
 
+    model = os.environ["ASSISTANT_HERMES_MODEL"]
+    api_key = os.environ["OPENROUTER_API_KEY"]
+    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    max_tokens = int(os.getenv("ASSISTANT_MAX_OUTPUT_TOKENS", "1200"))
+    kind = os.getenv("ASSISTANT_CONVERSATION_KIND", "dm")
+
     agent = AIAgent(
-        model=os.environ["ASSISTANT_HERMES_MODEL"],
-        api_key=os.environ["OPENROUTER_API_KEY"],
-        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
         quiet_mode=True,
         # Whitelist: only our MCP server's tools. The denylist is belt and braces.
         enabled_toolsets=[MCP_SERVER_NAME],
         disabled_toolsets=["terminal", "browser", "computer", "vision"],
         max_iterations=int(os.getenv("ASSISTANT_MAX_ITERATIONS", "12")),
-        max_tokens=int(os.getenv("ASSISTANT_MAX_OUTPUT_TOKENS", "1200")),
+        max_tokens=max_tokens,
         ephemeral_system_prompt=build_system_prompt(
-            os.getenv("ASSISTANT_CONVERSATION_KIND", "dm"),
+            kind,
             os.getenv("ASSISTANT_GROUP_NAME"),
             json.loads(os.getenv("ASSISTANT_PARTICIPANTS") or "[]"),
+            json.loads(os.environ["ASSISTANT_FILES"]) if os.getenv("ASSISTANT_FILES") else None,
         ),
         skip_memory=True,
         skip_context_files=True,
@@ -112,9 +123,36 @@ def _run(home: Path) -> dict:
         conversation_history=history or None,
         task_id=os.getenv("ASSISTANT_RUN_ID"),
     )
+    final_response = result.get("final_response", "") or ""
+    messages = result.get("messages", [])
+
+    # Second step: one tool-less call that merges everything the agent
+    # retrieved into a single answer. Skipped when no tool ran (nothing to
+    # merge); on failure the agent's own answer stands.
+    synthesized = None
+    if os.getenv("ASSISTANT_SYNTHESIZER_ENABLED", "1") == "1":
+        tool_results = collect_tool_results(
+            messages, int(os.getenv("ASSISTANT_SYNTHESIZER_MAX_INPUT_CHARS", "60000"))
+        )
+        if tool_results:
+            synthesized = synthesize(
+                model=os.getenv("ASSISTANT_SYNTHESIZER_MODEL") or model,
+                api_key=api_key,
+                base_url=base_url,
+                max_tokens=max_tokens,
+                messages=build_synthesis_messages(
+                    question=question,
+                    history=history,
+                    tool_results=tool_results,
+                    draft=final_response,
+                    kind=kind,
+                ),
+            )
+
     return {
-        "final_response": result.get("final_response", ""),
-        "messages": result.get("messages", []),
+        "final_response": synthesized or final_response,
+        "synthesized": synthesized is not None,
+        "messages": messages,
     }
 
 

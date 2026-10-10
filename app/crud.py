@@ -3,7 +3,8 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import exists, select
+from sqlalchemy import delete, exists, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -16,6 +17,9 @@ from app.models import (
     GroupMessage,
     GroupMessageRecipient,
     Message,
+    ParsedDocument,
+    ParsedDocumentPage,
+    ParseStatus,
     UploadedFile,
     UploadStatus,
     User,
@@ -462,6 +466,37 @@ async def file_belongs_to_conversation(
     )
     return bool(result.scalar())
 
+
+async def conversation_files(db: AsyncSession, user_a: uuid.UUID, user_b: uuid.UUID) -> list[UploadedFile]:
+    """Every completed file attached to a message between exactly these two
+    users, oldest first - what the assistant's list_chat_documents shows."""
+    result = await db.execute(
+        select(UploadedFile)
+        .join(Message, Message.attachment_file_id == UploadedFile.id)
+        .where(
+            UploadedFile.status == UploadStatus.COMPLETED,
+            ((Message.sender_id == user_a) & (Message.recipient_id == user_b))
+            | ((Message.sender_id == user_b) & (Message.recipient_id == user_a)),
+        )
+        .distinct()
+        .order_by(UploadedFile.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def group_files_for_user(db: AsyncSession, group_id: uuid.UUID, user_id: uuid.UUID) -> list[UploadedFile]:
+    """The files behind group_file_ids_for_user, oldest first."""
+    file_ids = await group_file_ids_for_user(db, group_id, user_id)
+    if not file_ids:
+        return []
+    result = await db.execute(
+        select(UploadedFile)
+        .where(UploadedFile.id.in_([uuid.UUID(file_id) for file_id in file_ids]))
+        .order_by(UploadedFile.created_at)
+    )
+    return list(result.scalars().all())
+
+
 async def group_file_ids_for_user(db: AsyncSession, group_id: uuid.UUID, user_id: uuid.UUID) -> list[str]:
     """Completed files attached to messages of this group that were sent by
     the user or addressed to them (so a later joiner never gets files that
@@ -489,3 +524,71 @@ async def group_file_accessible(
 ) -> bool:
     """Authorization for the assistant's get_document_content in a group."""
     return str(file_id) in await group_file_ids_for_user(db, group_id, user_id)
+
+
+# --- Parsed document cache --------------------------------------------------
+
+
+async def get_parsed_document_by_url(db: AsyncSession, document_url: str) -> ParsedDocument | None:
+    result = await db.execute(
+        select(ParsedDocument)
+        .where(ParsedDocument.document_url == document_url)
+        .options(selectinload(ParsedDocument.pages))
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_parsed_document(
+    db: AsyncSession,
+    *,
+    document_url: str,
+    file_id: uuid.UUID,
+    parser: str,
+    status: ParseStatus,
+    pages: list[dict],
+    error: str | None = None,
+) -> ParsedDocument:
+    """Store a parse once. ON CONFLICT DO NOTHING: if another writer (a
+    second worker process) stored the same URL first, keep theirs."""
+    document_id = uuid.uuid4()
+    result = await db.execute(
+        pg_insert(ParsedDocument)
+        .values(
+            id=document_id,
+            document_url=document_url,
+            file_id=file_id,
+            parser=parser,
+            status=status,
+            page_count=len(pages),
+            error=error,
+        )
+        .on_conflict_do_nothing(index_elements=[ParsedDocument.document_url])
+        .returning(ParsedDocument.id)
+    )
+    if result.scalar_one_or_none() is not None and pages:
+        await db.execute(
+            pg_insert(ParsedDocumentPage),
+            [
+                {
+                    "id": uuid.uuid4(),
+                    "document_id": document_id,
+                    "page_number": page["page_number"],
+                    "content": page.get("content") or "",
+                    "tables": page.get("tables") or [],
+                    "start_seconds": page.get("start_seconds"),
+                    "end_seconds": page.get("end_seconds"),
+                }
+                for page in pages
+            ],
+        )
+    await db.commit()
+    document = await get_parsed_document_by_url(db, document_url)
+    assert document is not None
+    return document
+
+
+async def delete_parsed_documents_for_file(db: AsyncSession, file_id: uuid.UUID) -> None:
+    """Deleted files keep their uploaded_files row (status DELETED), so the
+    FK cascade never fires; parsed plaintext must be removed explicitly."""
+    await db.execute(delete(ParsedDocument).where(ParsedDocument.file_id == file_id))
+    await db.commit()

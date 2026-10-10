@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud
 from app.assistant.cache import ClientMessage, message_context_cache
+from app.assistant.mcp_server import file_entry
 from app.assistant.scope import conversation_id_for_group, conversation_id_for_users, create_scope_token
 from app.config import get_settings
 
@@ -30,6 +31,26 @@ def _sanitize_response(text: str) -> str:
     zero-click way for injected instructions to exfiltrate chat context."""
     text = _MD_IMAGE.sub("", text)
     return _MD_LINK.sub(r"\1", text).strip()
+
+
+# Newest files listed in the system prompt; older ones stay reachable through
+# the list/search tools.
+MAX_PROMPT_FILES = 50
+
+
+async def _prompt_files(
+    db: AsyncSession, user_id: uuid.UUID, peer_id: uuid.UUID | None, group_id: uuid.UUID | None
+) -> list[dict]:
+    """The files the asker may see in this conversation, for the system
+    prompt - same queries (and so the same access rules) as list_chat_documents."""
+    if group_id is not None:
+        files = await crud.group_files_for_user(db, group_id, user_id)
+    else:
+        files = await crud.conversation_files(db, user_id, peer_id)
+    return [
+        {key: entry[key] for key in ("file_id", "filename", "kind")}
+        for entry in (file_entry(f) for f in files[-MAX_PROMPT_FILES:])
+    ]
 
 
 _RUN_SEMAPHORE: asyncio.Semaphore | None = None
@@ -130,6 +151,7 @@ async def run_assistant(
         if settings.assistant_allow_message_context and client_messages:
             await message_context_cache.put(run_id, client_messages)
         scope_token = create_scope_token(run_id=run_id, user_id=user_id, peer_id=peer_id, group_id=group_id)
+        prompt_files = await _prompt_files(db, user_id, peer_id, group_id)
 
         # Allowlisted env only: the agent reads untrusted documents, so it
         # must never inherit JWT/DB/SeaweedFS/scope secrets from this process.
@@ -148,10 +170,14 @@ async def run_assistant(
                 "ASSISTANT_HERMES_MODEL": settings.assistant_hermes_model,
                 "ASSISTANT_MAX_ITERATIONS": str(settings.assistant_max_iterations),
                 "ASSISTANT_MAX_OUTPUT_TOKENS": str(settings.assistant_max_output_tokens),
+                "ASSISTANT_SYNTHESIZER_ENABLED": "1" if settings.assistant_synthesizer_enabled else "0",
+                "ASSISTANT_SYNTHESIZER_MODEL": settings.assistant_synthesizer_model,
+                "ASSISTANT_SYNTHESIZER_MAX_INPUT_CHARS": str(settings.assistant_synthesizer_max_input_chars),
                 "ASSISTANT_QUESTION": question,
                 "ASSISTANT_CONVERSATION_KIND": "group" if group_id is not None else "dm",
                 "ASSISTANT_GROUP_NAME": group_name or "",
                 "ASSISTANT_PARTICIPANTS": json.dumps(participants or []),
+                "ASSISTANT_FILES": json.dumps(prompt_files),
                 "ASSISTANT_HISTORY": json.dumps(
                     _trim_history(assistant_history or [], settings.assistant_max_history_bytes)
                 ),

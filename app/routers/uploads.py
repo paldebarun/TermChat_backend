@@ -219,6 +219,8 @@ async def delete_upload(
         await asyncio.to_thread(vector_store.delete_file, str(file.id))
     except Exception:
         logger.exception("Failed to delete embeddings for %s", file.id)
+    # Same for the cached page-level parse (plaintext of the file).
+    await crud.delete_parsed_documents_for_file(db, file.id)
     return await crud.set_upload_status(db, file, UploadStatus.DELETED)
 
 

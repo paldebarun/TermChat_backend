@@ -56,10 +56,15 @@ class Settings(BaseSettings):
     assistant_max_history_bytes: int = 40_000
     assistant_recent_messages_limit: int = 20
     assistant_max_search_results: int = 8
-    assistant_run_timeout_seconds: int = 120
+    assistant_run_timeout_seconds: int = 180
     assistant_max_concurrent_runs: int = 4
     assistant_max_iterations: int = 12
     assistant_max_output_tokens: int = 1200
+    # After the tool-calling agent finishes, a second tool-less model call
+    # merges its tool results into one answer. Model empty = the agent's model.
+    assistant_synthesizer_enabled: bool = True
+    assistant_synthesizer_model: str = ""
+    assistant_synthesizer_max_input_chars: int = 60_000
     # Interpreter of the isolated Hermes venv. Empty = use /opt/hermes-venv if
     # it exists (Docker image), else this process's interpreter (local dev).
     assistant_hermes_python: str = ""
@@ -71,6 +76,16 @@ class Settings(BaseSettings):
     assistant_max_document_chars: int = 500_000
     assistant_chunk_size_chars: int = 1_200
     assistant_chunk_overlap_chars: int = 200
+    # Page-level parsing (Docling for documents, Whisper for audio) runs in an
+    # isolated venv: torch/transformers pins conflict with chromadb's.
+    # Empty = /opt/parser-venv if it exists (Docker image), else this interpreter.
+    assistant_parser_python: str = ""
+    assistant_parse_timeout_seconds: int = 600
+    assistant_max_concurrent_parses: int = 1
+    assistant_max_parse_pages: int = 500
+    assistant_whisper_model: str = "base"
+    assistant_max_audio_bytes: int = 200 * 1024 * 1024
+    assistant_audio_page_seconds: int = 300
 
     chroma_host: str = "chroma"
     chroma_port: int = 8000

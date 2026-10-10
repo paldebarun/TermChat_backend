@@ -70,6 +70,7 @@ async def _orphan_cleanup_loop() -> None:
                             await asyncio.to_thread(vector_store.delete_file, str(file.id))
                         except Exception:
                             logger.exception("Failed to delete embeddings for %s", file.id)
+                        await crud.delete_parsed_documents_for_file(db, file.id)
                     except Exception:
                         logger.exception("Failed to delete orphaned object %s", file.s3_key)
                         continue
@@ -126,8 +127,13 @@ async def health_check():
     return {"status": "ok"}
 
 
-def _ws_error(detail: str) -> str:
-    return json.dumps({"type": "error", "detail": detail})
+def _ws_error(detail: str, message_id=None) -> str:
+    """Error frame. `message_id` marks it as the rejection of that specific
+    message, so the sender's client can flag it as not sent."""
+    frame = {"type": "error", "detail": detail}
+    if message_id is not None:
+        frame["message_id"] = str(message_id)
+    return json.dumps(frame)
 
 
 async def _flush_pending(db: AsyncSession, websocket: WebSocket, user_id) -> None:
@@ -187,7 +193,7 @@ async def _handle_group_message(db: AsyncSession, websocket: WebSocket, raw: str
     group = await crud.get_group(db, payload.group_id)
     # One error for "no such group" and "not a member" so group ids don't leak.
     if group is None or not any(m.user_id == user_id for m in group.members):
-        await websocket.send_text(_ws_error("not a group member"))
+        await websocket.send_text(_ws_error("not a group member", payload.message_id))
         return
 
     attached_file = None
@@ -198,7 +204,7 @@ async def _handle_group_message(db: AsyncSession, websocket: WebSocket, raw: str
             or attached_file.owner_id != user_id
             or attached_file.status != UploadStatus.COMPLETED
         ):
-            await websocket.send_text(_ws_error("invalid attachment"))
+            await websocket.send_text(_ws_error("invalid attachment", payload.message_id))
             return
 
     if await crud.group_message_exists(db, payload.message_id):
@@ -208,7 +214,7 @@ async def _handle_group_message(db: AsyncSession, websocket: WebSocket, raw: str
     # Members who can receive: those who have uploaded a public key.
     keyed = {m.user.username: m.user for m in group.members if m.user.public_key}
     if key_recipients_error(keyed.keys(), [k.recipient for k in payload.keys], username) is not None:
-        await websocket.send_text(_ws_error("invalid recipient keys"))
+        await websocket.send_text(_ws_error("invalid recipient keys", payload.message_id))
         return
 
     keys_by_user_id = {keyed[k.recipient].id: k.encrypted_key for k in payload.keys}
@@ -302,12 +308,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 try:
                     payload = EncryptedMessageIn.model_validate_json(raw_message)
                 except Exception:
-                    await websocket.send_text('{"type": "error", "detail": "invalid message payload"}')
+                    await websocket.send_text(_ws_error("invalid message payload"))
                     continue
 
                 recipient = await crud.get_user_by_username(db, payload.recipient)
                 if recipient is None:
-                    await websocket.send_text('{"type": "error", "detail": "unknown recipient"}')
+                    await websocket.send_text(_ws_error("unknown recipient", payload.message_id))
                     continue
 
                 attached_file = None
@@ -318,7 +324,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         or attached_file.owner_id != user_id
                         or attached_file.status != UploadStatus.COMPLETED
                     ):
-                        await websocket.send_text('{"type": "error", "detail": "invalid attachment"}')
+                        await websocket.send_text(_ws_error("invalid attachment", payload.message_id))
                         continue
 
                 recipient_online = manager.is_connected(recipient.username)

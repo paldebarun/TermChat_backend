@@ -54,7 +54,9 @@ app/
     scope.py           Conversation id + scope tokens
     cache.py           In-memory, per-run store for client-decrypted messages
     indexing.py        Background document indexing after a message is sent
-    document_extract.py Text extraction + chunking
+    document_cache.py  Parse-once cache: page-level parses in Postgres, keyed by object URL
+    parse_worker.py    Docling / Whisper parser entrypoint (separate venv)
+    document_extract.py Plain-text extraction + chunking
     vectorstore.py     Chroma client
 tests/                 pytest suite (assistant, API contract)
 client/
@@ -188,13 +190,31 @@ Browser -> POST /assistant/query -> FastAPI creates an assistant_runs row and
            to use its tools, then the answer is returned.
 ```
 
+A run has two steps. The **agent** decides which tools to call and gathers
+the material. If it called any tool, a **synthesizer** (one more model call,
+with no tools) then merges the tool results and the agent's draft into a
+single answer; if that call fails the agent's own answer is returned.
+`ASSISTANT_SYNTHESIZER_ENABLED=false` turns the second step off.
+
 **What the agent can see**
 
 - **Shared documents** - attachments between the two users are indexed in
   the background (Chroma) after the message is sent, so a just-sent file may
-  take a moment to become searchable. Indexed: PDF (<= 500 pages), DOCX,
-  JSON/JSONL, CSV, TXT/MD and common code files; <= 25 MB and <= 500,000
-  characters of text.
+  take a moment to become searchable. Each file is parsed once, page by page,
+  and cached in Postgres (`parsed_documents` / `parsed_document_pages`, keyed
+  by `s3://bucket/key`); later reads never re-download or re-parse it.
+  - PDF (<= 500 pages), DOCX, PPTX, XLSX, HTML, Markdown, CSV and images:
+    Docling (layout, table structure, OCR); tables come back as markdown tables.
+  - Audio (mp3, wav, m4a, flac, ogg, ...): Whisper transcript, split into
+    5-minute timestamped "pages"; <= 200 MB.
+  - JSON/JSONL, TXT and common code files: plain text, one page.
+  - Video: not parsed; the agent only sees metadata.
+  The agent finds files either by searching their text or by listing every
+  file in the conversation (`list_chat_documents`), so a file with no
+  searchable text - e.g. audio with no speech - is still visible to it.
+  Documents <= 25 MB; <= 500,000 characters of text are indexed for search.
+  Docling and Whisper run in their own venv (`requirements-parser.txt`,
+  `/opt/parser-venv` in Docker) with models baked into the image at build time.
 - **Peer chat messages (opt-in)** - the server only stores ciphertext, so the
   client must send decrypted recent messages as `message_context` (max 100).
   They are held in memory for that single run and discarded. This is ignored

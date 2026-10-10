@@ -2,8 +2,20 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -190,6 +202,60 @@ class UploadedFile(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     owner: Mapped["User"] = relationship("User")
+
+
+class ParseStatus(str, enum.Enum):
+    READY = "READY"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class ParsedDocument(Base):
+    """Page-level parse of one stored object (Docling for documents, Whisper
+    for audio), cached so a document is parsed at most once. Keyed by the
+    canonical object URL (s3://bucket/key); presigned URLs expire, so they
+    can't be the key."""
+
+    __tablename__ = "parsed_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_url: Mapped[str] = mapped_column(String(1100), unique=True, index=True, nullable=False)
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("uploaded_files.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    parser: Mapped[str] = mapped_column(String(32), nullable=False)  # "docling" | "whisper" | "text"
+    status: Mapped[ParseStatus] = mapped_column(Enum(ParseStatus, name="parse_status"), nullable=False)
+    page_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    pages: Mapped[list["ParsedDocumentPage"]] = relationship(
+        "ParsedDocumentPage",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        order_by="ParsedDocumentPage.page_number",
+    )
+
+
+class ParsedDocumentPage(Base):
+    """One page of a parsed document (or one time window of an audio
+    transcript). content is markdown with tables inlined; tables holds the
+    same tables in structured form."""
+
+    __tablename__ = "parsed_document_pages"
+    __table_args__ = (UniqueConstraint("document_id", "page_number"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("parsed_documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    page_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    tables: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    document: Mapped["ParsedDocument"] = relationship("ParsedDocument", back_populates="pages")
+
 
 class AssistantRun(Base):
     __tablename__ = "assistant_runs"

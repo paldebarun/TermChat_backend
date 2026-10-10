@@ -45,6 +45,7 @@ class ConversationVectorStore:
         file_id: str,
         filename: str,
         chunks: list[tuple[int, str]],
+        page_numbers: list[int] | None = None,
     ) -> None:
         if not chunks:
             return
@@ -62,6 +63,10 @@ class ConversationVectorStore:
             }
             for index, _ in chunks
         ]
+        # page_number lets the agent fetch just that page with
+        # get_document_content(file_id, start_page=p, end_page=p).
+        for metadata, page_number in zip(metadatas, page_numbers or []):
+            metadata["page_number"] = page_number
         collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
     def delete_file(self, file_id: str) -> None:
